@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+config.json
+config.tmp
+history.sqlite3*
+run.lock
+*.pdf
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.build-venv/

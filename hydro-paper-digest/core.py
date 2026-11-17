@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -96,8 +97,19 @@ def single_run(home):
 def connect(home):
     home.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(home / 'history.sqlite3', timeout=30)
-    c.execute('CREATE TABLE IF NOT EXISTS papers (id TEXT PRIMARY KEY, identity TEXT UNIQUE, day TEXT, lang TEXT, payload TEXT, notion_id TEXT, UNIQUE(day, lang))')
-    c.commit()
+    schema = 'CREATE TABLE IF NOT EXISTS papers (id TEXT PRIMARY KEY, identity TEXT UNIQUE, day TEXT, lang TEXT, payload TEXT, notion_id TEXT, mode TEXT NOT NULL DEFAULT "daily")'
+    with c:
+        cols = {row[1] for row in c.execute('PRAGMA table_info(papers)')}
+        if cols and 'mode' not in cols:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute('ALTER TABLE papers RENAME TO papers_legacy')
+            c.execute(schema)
+            c.execute('INSERT INTO papers (id,identity,day,lang,payload,notion_id) SELECT id,identity,day,lang,payload,notion_id FROM papers_legacy')
+            c.execute('DROP TABLE papers_legacy')
+        else:
+            c.execute(schema)
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS daily_slots ON papers(day,lang) WHERE mode='daily'")
+
     return c
 
 
@@ -249,7 +261,7 @@ def sync(p, dbid, headers):
 def export(c, home):
     for (payload,) in c.execute('SELECT payload FROM papers'):
         p = json.loads(payload)
-        folder = home / p['day']
+        folder = home / p.get('folder', p['day'])
         folder.mkdir(parents=True, exist_ok=True)
         for suffix, content in [('json', json.dumps(p, ensure_ascii=False, indent=2)), ('md', markdown(p))]:
             target = folder / f"{p['lang']}.{suffix}"
@@ -258,14 +270,16 @@ def export(c, home):
             temp.replace(target)
 
 
-def run(config, home=HOME, today=None, log=print):
+def run(config, home=HOME, today=None, log=print, manual=False):
     today = today or now().date()
+    relative_folder = str(today) + ('/manual-' + now().strftime('%H%M%S') + '-' + uuid.uuid4().hex[:8] if manual else '')
+    saved_folder = None
     with single_run(home):
         c = connect(home)
         try:
             for lang in ('en', 'ko'):
                 label = '한국어' if lang == 'ko' else '해외(영어)'
-                if c.execute('SELECT 1 FROM papers WHERE day=? AND lang=?', (str(today), lang)).fetchone():
+                if not manual and c.execute("SELECT 1 FROM papers WHERE day=? AND lang=? AND mode='daily'", (str(today), lang)).fetchone():
                     log(f'{label}: 오늘 선정분 유지')
                     continue
                 try:
@@ -276,15 +290,16 @@ def run(config, home=HOME, today=None, log=print):
                         log(f'{label}: 조건에 맞는 새 논문 없음. 검색 기간 또는 공급원 보강 필요')
                         continue
                     log(f'{label}: 초록 기반 한국어 요약 중…')
-                    p.update(summarize(config, p), day=str(today))
-                    folder = home / str(today)
-                    folder.mkdir(exist_ok=True)
-                    p['pdf_file'] = download(p, folder) if config['download_pdf'] else None
+                    p.update(summarize(config, p), day=str(today), folder=relative_folder, mode='manual' if manual else 'daily')
+                    folder = home / relative_folder
+                    folder.mkdir(parents=True, exist_ok=True)
+                    p['pdf_file'] = download(p, folder) if manual or config['download_pdf'] else None
                     with c:
-                        c.execute('INSERT INTO papers VALUES (?, ?, ?, ?, ?, NULL)',
-                                  (p['id'], p['identity'], str(today), lang, json.dumps(p, ensure_ascii=False)))
+                        c.execute('INSERT INTO papers (id,identity,day,lang,payload,notion_id,mode) VALUES (?, ?, ?, ?, ?, NULL, ?)',
+                                  (p['id'], p['identity'], str(today), lang, json.dumps(p, ensure_ascii=False), p['mode']))
+                    saved_folder = folder
                     log(f'{label}: 저장 완료 — {p["title"]}')
-                    if config['download_pdf'] and not p['pdf_file']:
+                    if (manual or config['download_pdf']) and not p['pdf_file']:
                         log(f'{label}: PDF 저장 실패. 제공된 직접 PDF 링크를 유지합니다.')
                 except Exception as e:
                     log(f'{label}: {safe_error(e)}')
@@ -302,6 +317,7 @@ def run(config, home=HOME, today=None, log=print):
                     log(f'노션 전송 보류: {safe_error(e)} 파일은 유지되며 다음 실행에 재시도합니다.')
             elif pending:
                 log('로컬 저장 완료. 노션은 연결 설정 후 전송됩니다.')
+            return saved_folder
         finally:
             c.close()
 

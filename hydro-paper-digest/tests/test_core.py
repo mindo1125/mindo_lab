@@ -139,3 +139,40 @@ class Tests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ManualTests(unittest.TestCase):
+    setUp = Tests.setUp
+    tearDown = Tests.tearDown
+
+    @patch.object(core, 'download', return_value='saved.pdf')
+    @patch.object(core, 'search')
+    @patch.object(core, 'summarize', return_value={'reason': '동기', 'summary': ['1', '2', '3']})
+    def test_multiple_manual_requests_and_daily_slot(self, summarize, search, download):
+        def pool(config, lang, day):
+            return [{**paper(lang), 'id': lang + str(i), 'identity': lang + str(i)} for i in range(4)]
+        search.side_effect = pool
+        first = core.run(self.config, self.home, self.day, lambda x: None, manual=True)
+        second = core.run(self.config, self.home, self.day, lambda x: None, manual=True)
+        core.run(self.config, self.home, self.day, lambda x: None)
+        core.run(self.config, self.home, self.day, lambda x: None)
+        self.assertNotEqual(first, second)
+        self.assertTrue((first / 'en.md').exists())
+        self.assertTrue((second / 'en.md').exists())
+        self.assertEqual(download.call_count, 4)
+        c = core.connect(self.home)
+        self.assertEqual(c.execute('SELECT COUNT(*) FROM papers').fetchone()[0], 6)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM papers WHERE mode='daily'").fetchone()[0], 2)
+        c.close()
+
+    def test_migration_preserves_history(self):
+        import sqlite3
+        c = sqlite3.connect(self.home / 'history.sqlite3')
+        c.execute('CREATE TABLE papers (id TEXT PRIMARY KEY, identity TEXT UNIQUE, day TEXT, lang TEXT, payload TEXT, notion_id TEXT, UNIQUE(day,lang))')
+        c.execute('INSERT INTO papers VALUES (?,?,?,?,?,?)', ('id','doi',str(self.day),'en','{}','notion-page'))
+        c.commit()
+        c.close()
+        c = core.connect(self.home)
+        self.assertEqual(c.execute('SELECT mode,notion_id FROM papers').fetchone(), ('daily','notion-page'))
+        c.execute('INSERT INTO papers VALUES (?,?,?,?,?,?,?)', ('id2','doi2',str(self.day),'en','{}',None,'manual'))
+        c.commit()
+        c.close()

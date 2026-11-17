@@ -49,19 +49,20 @@ def desktop():
             opts.pack(fill='x')
             self.download = tk.BooleanVar(value=self.config_data['download_pdf'])
             self.auto = tk.BooleanVar(value=self.config_data['automatic'])
-            ttk.Checkbutton(opts, text='공개 PDF 저장 (최대 25MB)', variable=self.download).pack(side='left')
+            ttk.Checkbutton(opts, text='자동 수집 시 PDF 저장 (수동 추천은 항상 저장)', variable=self.download).pack(side='left')
             ttk.Checkbutton(opts, text='자정 자동 수집 (이 창을 켜둬야 동작)', variable=self.auto, command=self.auto_changed).pack(side='left', padx=18)
             buttons = ttk.Frame(body)
             buttons.pack(fill='x', pady=12)
             self.save_btn = ttk.Button(buttons, text='설정 저장', command=self.save)
             self.save_btn.pack(side='left')
-            self.run_btn = ttk.Button(buttons, text='지금 수집 / 노션 재전송', command=self.start)
+            self.run_btn = ttk.Button(buttons, text='새 논문 추천 + 다운로드 (F5)', command=self.start)
             self.run_btn.pack(side='left', padx=8)
+            self.bind('<F5>', lambda event: self.start())
             ttk.Button(buttons, text='저장 폴더 열기', command=self.open_folder).pack(side='left')
             ttk.Button(buttons, text='키 발급·노션 연결 안내', command=self.help).pack(side='left', padx=8)
             ttk.Label(body, text='주목도는 발행 경과일을 고려한 인용 수와 주제 적합도입니다. SNS 언급량·조회수는 측정하지 않습니다.').pack(anchor='w')
             ttk.Label(body, text='요약은 초록 기반입니다. 한국어 데이터 수록 범위 때문에 매일 1편을 확보하지 못할 수 있습니다.').pack(anchor='w')
-            self.status = tk.StringVar(value='설정 저장 → 지금 수집 순서로 시작하세요.')
+            self.status = tk.StringVar(value='설정 저장 → 새 논문 추천 또는 F5 순서로 시작하세요.')
             ttk.Label(body, textvariable=self.status).pack(anchor='w', pady=8)
             self.log_box = scrolledtext.ScrolledText(body, height=13, wrap='word', font=('Malgun Gothic', 10))
             self.log_box.pack(fill='both', expand=True)
@@ -99,7 +100,7 @@ def desktop():
             if self.save():
                 self.last_day, self.last_attempt = None, 0
 
-        def start(self):
+        def start(self, manual=True):
             if self.busy or not self.save():
                 return
             if not self.config_data['openalex_key'] or not self.config_data['openai_key']:
@@ -112,12 +113,13 @@ def desktop():
             self.status.set('검색·요약 중입니다. 몇 분 걸릴 수 있습니다.')
             config = dict(self.config_data)
             def worker():
+                folder = None
                 try:
-                    core.run(config, log=lambda text: self.events.put(('log', text)))
+                    folder = core.run(config, log=lambda text: self.events.put(('log', text)), manual=manual)
                 except Exception as error:
                     self.events.put(('log', core.safe_error(error)))
                 finally:
-                    self.events.put(('done', None))
+                    self.events.put(('done', str(folder) if manual and folder else None))
             threading.Thread(target=worker, daemon=True).start()
 
         def poll(self):
@@ -131,6 +133,8 @@ def desktop():
                         self.run_btn.configure(state='normal')
                         self.save_btn.configure(state='normal')
                         self.status.set('작업 종료. 아래 기록에서 각 언어 저장·노션 전송 결과를 확인하세요.')
+                        if text:
+                            self.open_folder(Path(text))
             except queue.Empty:
                 pass
             self.after(200, self.poll)
@@ -138,17 +142,18 @@ def desktop():
         def schedule(self):
             if self.auto.get() and not self.busy and self.config_data['openalex_key'] and self.config_data['openai_key']:
                 if self.last_day != core.now().date() or time.monotonic() - self.last_attempt >= 900:
-                    self.start()
+                    self.start(manual=False)
             self.after(10000, self.schedule)
 
-        def open_folder(self):
-            core.HOME.mkdir(parents=True, exist_ok=True)
+        def open_folder(self, folder=None):
+            folder = folder or core.HOME
+            folder.mkdir(parents=True, exist_ok=True)
             if os.name == 'nt':
-                os.startfile(str(core.HOME))
+                os.startfile(str(folder))
             elif sys.platform == 'darwin':
-                subprocess.Popen(['open', str(core.HOME)])
+                subprocess.Popen(['open', str(folder)])
             else:
-                subprocess.Popen(['xdg-open', str(core.HOME)])
+                subprocess.Popen(['xdg-open', str(folder)])
 
         def help(self):
             messagebox.showinfo('시작 안내',
@@ -156,7 +161,7 @@ def desktop():
                 '2. OpenAI: platform.openai.com/api-keys 에서 API 키 발급\n'
                 '3. Notion: notion.so/profile/integrations 에서 내부 통합 생성\n'
                 '4. 빈 상위 페이지에 통합을 연결하고 그 페이지 URL 입력\n'
-                '5. 설정 저장 → 지금 수집\n\n'
+                '5. 설정 저장 → 새 논문 추천 또는 F5\n\n'
                 '연결된 페이지 아래에 표 데이터베이스를 자동 생성합니다.\n'
                 '자정 자동 수집은 이 창과 PC를 켜두어야 동작합니다.\n'
                 '노트북 절전 상태에서는 실행되지 않습니다.\n'
